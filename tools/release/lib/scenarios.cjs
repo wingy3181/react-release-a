@@ -2,6 +2,7 @@
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const assert = require('node:assert/strict');
 let cwd = process.cwd();
 const cli = path.join(__dirname, 'cli.cjs');
@@ -44,8 +45,61 @@ function close(train) {
   call(['close', train]);
 }
 try {
-  const out = call(['setup']);
-  cwd = out.match(/POC_WORKSPACE=(.+)/)[1];
+  if (process.argv.includes('--in-place')) {
+    // Exercise hosted-mode behavior with a local origin: never touch GitHub in tests.
+    const source = cwd;
+    const home = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nx-release-inplace-test-'),
+    );
+    const remote = path.join(home, 'origin.git');
+    const work = path.join(home, 'work');
+    git('init', '--bare', remote);
+    git('clone', '--no-hardlinks', source, work);
+    cwd = work;
+    git('remote', 'set-url', 'origin', remote);
+    git('config', 'user.name', 'Release POC');
+    git('config', 'user.email', 'release-poc@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'tag.gpgsign', 'false');
+    git('checkout', '-B', 'main');
+    fs.cpSync(
+      path.join(source, 'tools/release'),
+      path.join(work, 'tools/release'),
+      { recursive: true },
+    );
+    fs.copyFileSync(path.join(source, 'nx.json'), path.join(work, 'nx.json'));
+    if (git('status', '--porcelain')) {
+      git('add', '--all');
+      git('commit', '-m', 'test: in-place implementation');
+    }
+    fs.cpSync(
+      path.join(source, 'node_modules'),
+      path.join(work, 'node_modules'),
+      {
+        recursive: true,
+        verbatimSymlinks: true,
+        mode: fs.constants.COPYFILE_FICLONE,
+      },
+    );
+    git('push', '-u', 'origin', 'main');
+    const initial = git('rev-parse', 'HEAD');
+    call(['setup', '--in-place', '--remote', `${remote}-wrong`], true);
+    call(['setup', '--in-place', '--remote', remote, '--dry-run']);
+    assert.equal(git('rev-parse', 'HEAD'), initial);
+    assert(!fs.existsSync(path.join(cwd, '.git/release-poc/state.json')));
+    call(['setup', '--in-place', '--remote', remote]);
+    const prepared = git('rev-parse', 'HEAD');
+    call(['setup', '--in-place', '--remote', remote]);
+    assert.equal(git('rev-parse', 'HEAD'), prepared);
+    assert.equal(state().mode, 'in-place');
+    assert.equal(git('rev-parse', 'origin/main'), prepared);
+    console.log(
+      'PASS: in-place initialization, dry-run, remote guard, repeated setup',
+    );
+  } else {
+    const out = call(['setup']);
+    cwd = out.match(/POC_WORKSPACE=(.+)/)[1];
+  }
   console.log(`Sandbox: ${cwd}`);
   call(['train-cut', '2026.09.01'], true); // version-only changes must not select apps
   change('both', 'initial');

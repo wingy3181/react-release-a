@@ -2,7 +2,27 @@
 
 This POC implements the agreed release policy using shell entry points, the **Nx CLI** for versioning/affected projects, and Git for branch/commit/tag operations. No Nx Release programmatic API is used. Shop represents eBanking; API represents NTB; `packages/shared/models` is their shared library.
 
-All mutating commands require a disposable workspace initialized by `simulation/setup.sh`. They refuse to operate against a hosted remote. GitHub Actions currently runs the same local POC against a bare remote on the runner; it does **not** deploy production or create real GitHub PRs. This is intentional until the environment manifest/publishing adapter and repository permissions are supplied.
+Initialize explicitly in either a disposable clone or this checkout. **In-place mode creates and pushes real commits, branches, and tags to the exact origin you select**, including deleting release branches on closure. Production deployment remains mocked, and PR merges are still simulated Git rebase/fast-forward operations (not real GitHub reviews). GitHub Actions continues to run isolated scenarios against a local bare remote.
+
+## Use this workspace and GitHub
+
+Commit the implementation changes and push `main` before initializing. The working tree must be clean, on `main`, and at the same commit as remote `main`.
+
+```bash
+# Preview only: no refs, manifests, commits, or pushes are changed.
+bash tools/release/simulation/setup.sh --in-place \
+  --remote git@github.com:wingy3181/react-release-a.git --dry-run
+
+# Initialize this checkout and push baseline tags + development snapshots.
+bash tools/release/simulation/setup.sh --in-place \
+  --remote git@github.com:wingy3181/react-release-a.git
+
+bash tools/release/simulation/status.sh
+```
+
+Initial app versions represent mock production. With the example's `0.0.1` baselines, initialization tags `@org/shop@0.0.1` and `@org/api@0.0.1`, then commits/pushes `0.1.0-snapshot.0` for both apps on main via Nx. It keeps your Git author/signing configuration. State and mock production live under `.git/release-poc/` and are not committed or pushed. Subsequent commands reject a changed fetch or push URL. Re-running completed setup is a no-op; interrupted setup can resume its saved version plan, provided unrelated working-tree changes are not introduced.
+
+This is a single-checkout POC: other clones/runners cannot reconstruct the operation journal automatically. In-place simulated PR merges push directly to main, so repository rules requiring actual PR approval would reject them. Use a test repository where that behavior is acceptable; a real PR adapter remains future work.
 
 ## Quick start
 
@@ -21,6 +41,8 @@ Run all automated scenarios from the original workspace:
 
 ```bash
 bash tools/release/simulation/run-scenarios.sh
+# Exercise in-place mode against a fresh LOCAL test remote (not your GitHub repo):
+bash tools/release/simulation/run-scenarios.sh --in-place
 # Also run actual application builds in each candidate checkout:
 RELEASE_POC_REAL_BUILD=1 bash tools/release/simulation/run-scenarios.sh
 ```
@@ -29,7 +51,7 @@ The default simulator creates explicitly marked mock artifact records. `RELEASE_
 
 ## Scripts and arguments
 
-All commands below run inside the disposable `work` checkout. Project arguments are `shop` or `api`. App Git tags use actual project names, e.g. `@org/api@0.1.1`.
+All commands below run inside the initialized checkout (disposable or in-place). Project arguments are `shop` or `api`. App Git tags use actual project names, e.g. `@org/api@0.1.1`.
 
 | Script                        | Arguments and responsibility                                                                                                                                    |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |

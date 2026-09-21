@@ -74,6 +74,16 @@ function tag(name, target) {
   else git('tag', '-a', name, target, '-m', name);
   git('push', 'origin', `refs/tags/${name}`);
 }
+function checkRemote(expected) {
+  assert(
+    expected && git('remote', 'get-url', 'origin') === expected,
+    'origin does not match the explicitly selected remote.',
+  );
+  assert(
+    git('remote', 'get-url', '--push', 'origin') === expected,
+    'origin push URL differs from the selected remote.',
+  );
+}
 function project(app) {
   assert(apps[app], `Unknown app ${app}; use shop or api`);
   return apps[app];
@@ -500,7 +510,182 @@ function deploy(name, app, mode = 'success') {
   write(path.join(state.storage, 'production.json'), prod);
   console.log(`Simulated production: ${app} ${c.version}`);
 }
-function setup() {
+function bootstrap() {
+  // Persist a journal before the first tag/push so setup can safely resume.
+  if (!state.bootstrap) {
+    const sourceSha = sha();
+    const prod = {};
+    for (const a of Object.keys(apps)) {
+      const v = version(a);
+      assert(
+        semver.valid(v) && !semver.prerelease(v),
+        `${a}: bootstrap requires a stable baseline version.`,
+      );
+      prod[a] = {
+        version: v,
+        sourceSha,
+        tag: `${project(a)}@${v}`,
+        artifactId: 'bootstrap',
+      };
+      const existing = git('tag', '--list', prod[a].tag);
+      assert(
+        !existing || sha(existing) === sourceSha,
+        `Baseline tag collision: ${prod[a].tag}`,
+      );
+    }
+    state.bootstrap = { status: 'preparing', production: prod };
+    save();
+  }
+  const initial = state.bootstrap;
+  if (initial.status === 'complete') {
+    console.log('Already initialized.');
+    return;
+  }
+  assert(branch() === 'main', 'Resume initialization on main.');
+  for (const c of Object.values(initial.production)) tag(c.tag, c.sourceSha);
+  const prodPath = path.join(state.storage, 'production.json');
+  if (!fs.existsSync(prodPath)) write(prodPath, initial.production);
+  for (const [a, c] of Object.entries(initial.production)) {
+    const next = semver.inc(c.version, 'preminor', 'snapshot');
+    assert(
+      [c.version, next].includes(version(a)),
+      `${a}: unexpected version during bootstrap recovery.`,
+    );
+    if (version(a) !== next) bump(a, next);
+  }
+  const allowed = [
+    'apps/shop/package.json',
+    'apps/api/package.json',
+    'package-lock.json',
+  ];
+  const changed = git('status', '--porcelain')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.trim().replace(/^[A-Z?!]{1,2}\s+/, ''));
+  assert(
+    changed.every((f) => allowed.includes(f)),
+    'Unexpected changes during initialization; inspect before retrying.',
+  );
+  if (changed.length) {
+    git('add', '--', ...allowed);
+    git('commit', '-m', 'chore(poc): initial development snapshots');
+  }
+  push();
+  initial.status = 'complete';
+  save();
+}
+function setupInPlace(args) {
+  const remoteIndex = args.indexOf('--remote');
+  const remote = args[remoteIndex + 1];
+  assert(
+    remoteIndex >= 0 && remote && !remote.startsWith('--'),
+    'Usage: setup.sh --in-place --remote EXACT_ORIGIN_URL [--dry-run]',
+  );
+  assert(
+    args.every(
+      (a, i) =>
+        ['--in-place', '--remote', '--dry-run'].includes(a) ||
+        i === remoteIndex + 1,
+    ),
+    'Unknown setup argument.',
+  );
+  root = git('rev-parse', '--show-toplevel');
+  assert(
+    fs.statSync(path.join(root, '.git')).isDirectory(),
+    'In-place POC requires a regular checkout, not a linked worktree.',
+  );
+  checkRemote(remote);
+  assert(branch() === 'main', 'Initialize on main.');
+  const marker = path.join(root, '.git/release-poc/state.json');
+  if (fs.existsSync(marker)) {
+    state = read(marker);
+    assert(
+      state.mode === 'in-place' && state.remote === remote,
+      'Existing state belongs to another mode/remote.',
+    );
+    if (state.bootstrap?.status === 'complete') {
+      console.log('Already initialized.');
+      return;
+    }
+  } else {
+    if (!args.includes('--dry-run')) clean();
+    state = {
+      mode: 'in-place',
+      remote,
+      storage: path.join(root, '.git/release-poc/runtime'),
+      branches: {},
+      merges: {},
+    };
+  }
+  if (args.includes('--dry-run')) {
+    console.log(
+      JSON.stringify(
+        {
+          workspace: root,
+          remote,
+          mode: 'in-place',
+          baseline: sha(),
+          apps: Object.fromEntries(
+            Object.keys(apps).map((a) => [
+              a,
+              {
+                current: version(a),
+                snapshot: semver.inc(version(a), 'preminor', 'snapshot'),
+              },
+            ]),
+          ),
+          actions: [
+            'Verify remote main and existing tags',
+            'Push baseline app tags',
+            'Seed mock production manifest',
+            'Commit and push initial snapshots on main',
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  const lock = path.join(path.dirname(marker), 'lock');
+  fs.mkdirSync(lock);
+  try {
+    if (!state.bootstrap) {
+      const remoteMain = git(
+        'ls-remote',
+        '--heads',
+        'origin',
+        'refs/heads/main',
+      ).split(/\s/)[0];
+      assert(
+        remoteMain === sha(),
+        'Push main first; local HEAD must equal remote main before initialization.',
+      );
+      assert(
+        !git(
+          'ls-remote',
+          '--heads',
+          'origin',
+          'refs/heads/release/*',
+          'refs/heads/hotfix/*',
+        ),
+        'Existing release/hotfix branches require review before initialization.',
+      );
+      git('fetch', 'origin', '--tags');
+    }
+    bootstrap();
+    console.log(`POC_WORKSPACE=${root}`);
+  } finally {
+    fs.rmdirSync(lock);
+  }
+}
+function setup(args = []) {
+  if (args.includes('--in-place')) return setupInPlace(args);
+  assert(
+    args.length === 0,
+    'Use --in-place --remote URL, or no arguments for a disposable clone.',
+  );
   const source = git('rev-parse', '--show-toplevel');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nx-release-poc-'));
   const remote = path.join(home, 'origin.git');
@@ -547,24 +732,7 @@ function setup() {
     merges: {},
     remote,
   };
-  const prod = {};
-  for (const a of Object.keys(apps)) {
-    const v = version(a);
-    const name = `${project(a)}@${v}`;
-    tag(name, sha());
-    prod[a] = {
-      version: v,
-      sourceSha: sha(),
-      tag: name,
-      artifactId: 'bootstrap',
-    };
-  }
-  write(path.join(state.storage, 'production.json'), prod);
-  for (const a of Object.keys(apps))
-    bump(a, semver.inc(prod[a].version, 'preminor', 'snapshot'));
-  commit('chore(poc): initial development snapshots');
-  push();
-  save();
+  bootstrap();
   console.log(`POC_WORKSPACE=${work}`);
   return work;
 }
@@ -572,7 +740,7 @@ function main() {
   const [command, ...args] = process.argv.slice(2);
   if (args.includes('--help')) {
     const usage = {
-      setup: '(no arguments)',
+      setup: '[--in-place --remote EXACT_ORIGIN_URL [--dry-run]]',
       'train-cut': 'yyyy.mm.nn',
       'hotfix-cut': 'shop|api identifier',
       pick: 'release-or-hotfix-branch operation-id sha [sha ...]',
@@ -584,23 +752,27 @@ function main() {
       status: '(no arguments)',
     };
     console.log(
-      `Usage: ${command} ${usage[command] || ''}\nSee tools/release/README.md. Operations are local POC only.`,
+      `Usage: ${command} ${usage[command] || ''}\nSee tools/release/README.md. Deployments are simulated; Git operations use the initialized remote.`,
     );
     return;
   }
-  if (command === 'setup') return setup();
+  if (command === 'setup') return setup(args);
   root = git('rev-parse', '--show-toplevel');
   const marker = path.join(root, '.git/release-poc/state.json');
   assert(
     fs.existsSync(marker),
-    'POC operations require a disposable workspace. Run simulation/setup.sh first.',
+    'Initialize first with simulation/setup.sh (disposable) or --in-place --remote URL.',
   );
   state = read(marker);
+  checkRemote(state.remote);
   assert(
-    git('remote', 'get-url', 'origin') === state.remote &&
-      path.isAbsolute(state.remote) &&
-      fs.existsSync(state.remote),
-    'POC refuses non-local or changed remotes.',
+    state.mode === 'in-place' ||
+      (path.isAbsolute(state.remote) && fs.existsSync(state.remote)),
+    'Disposable mode requires its local remote.',
+  );
+  assert(
+    !state.bootstrap || state.bootstrap.status === 'complete',
+    'Initialization incomplete; rerun setup with the original arguments.',
   );
   const lock = path.join(root, '.git/release-poc/lock');
   assert(
