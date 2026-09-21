@@ -1,6 +1,6 @@
 {
   "name": "@org/shop",
-  "version": "0.1.0-snapshot.0",
+  "version": "0.1.0",
   "private": true,
   "nx": {
     "projectType": "application",
