@@ -116,5 +116,21 @@
       }
     }
   },
-  "analytics": false
+  "analytics": false,
+  "release": {
+    "projects": ["@org/shop", "@org/api"],
+    "projectsRelationship": "independent",
+    "releaseTag": { "pattern": "{projectName}@{version}" },
+    "version": {
+      "currentVersionResolver": "disk",
+      "adjustSemverBumpsForZeroMajorVersion": false,
+      "updateDependents": "never",
+      "git": {
+        "stageChanges": false,
+        "commit": false,
+        "tag": false,
+        "push": false
+      }
+    }
+  }
 }

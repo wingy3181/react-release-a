@@ -1,0 +1,41 @@
+name: Release workflow POC
+
+on:
+  workflow_dispatch:
+    inputs:
+      real_builds:
+        description: Run real Nx builds before simulated production updates
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-poc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_POC_REAL_BUILD: ${{ inputs.real_builds && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Exercise local release scripts against a disposable remote
+        run: bash tools/release/simulation/run-scenarios.sh
+      - name: Preserve POC manifests and candidate records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-poc-records
+          path: /tmp/nx-release-poc-*/state/
+          retention-days: 14
